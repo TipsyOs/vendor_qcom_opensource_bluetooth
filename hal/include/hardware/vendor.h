@@ -23,10 +23,12 @@
 __BEGIN_DECLS
 
 #define BT_PROFILE_VENDOR_ID "vendor"
+#define BT_PROFILE_WIPOWER_VENDOR_ID "wipower"
 
 /** Callback when bredr cleanup is done.
  */
 typedef void (*  btvendor_bredr_cleanup_callback)(bool status);
+typedef void (*  btvendor_snooplog_status_callback)(bool status);
 
 
 /** BT-Vendor callback structure. */
@@ -34,6 +36,7 @@ typedef struct {
     /** set to sizeof(BtVendorCallbacks) */
     size_t      size;
     btvendor_bredr_cleanup_callback  bredr_cleanup_cb;
+    btvendor_snooplog_status_callback  update_snooplog_status_cb;
 } btvendor_callbacks_t;
 
 /** Represents the standard BT-Vendor interface.
@@ -53,6 +56,9 @@ typedef struct {
 
     /** Does BREDR cleanup */
     void (*bredrcleanup)(void);
+
+    /** Generate level 6 logs */
+    void (*capture_vnd_logs)(void);
 
     /** Closes the interface. */
     void  (*cleanup)( void );

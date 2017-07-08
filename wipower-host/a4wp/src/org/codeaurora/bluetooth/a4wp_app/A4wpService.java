@@ -84,9 +84,11 @@ public class A4wpService extends Service
     private BluetoothDevice mDevice = null;
     private PowerManager.WakeLock mWakeLock = null;
 
+    private static boolean sDebug = false;
+
     // Advertising variables
-    private final static int START_ADVERTISING = 1;
-    private final static int STOP_ADVERTISING = 0;
+    private static final int START_ADVERTISING = 1;
+    private static final int STOP_ADVERTISING = 0;
 
     private static final UUID A4WP_SERVICE_UUID = UUID.fromString("6455fffe-a146-11e2-9e96-0800200c9a67");
     //PRU writes
@@ -102,26 +104,26 @@ public class A4wpService extends Service
     private static final Object mLock = new Object();
     private int mState = BluetoothProfile.STATE_DISCONNECTED;
 
-    private final static short DEFAULT_FIELDS = 0x0000;
-    private final static short DEFAULT_PROTOCOL_REV = 0x0000;
-    private final static short DEFAULT_RFU = 0x0000;
+    private static final short DEFAULT_FIELDS = 0x0000;
+    private static final short DEFAULT_PROTOCOL_REV = 0x0001;
+    private static final short DEFAULT_RFU = 0x0000;
     //03 if MTP, Has to be 04 for fluid.
-    private final static byte DEFAULT_CATEGORY = 0x0003;
-    private final static byte DEFAULT_CAPABILITIES = 0x00;
-    private final static byte DEFAULT_HW_VERSION = 0x0007;
-    private final static byte DEFAULT_FW_VERSION = 0x0006;
-    private final static byte DEFAULT_MAX_POWER_DESIRED = 0x0032;  // 5Watts
-    private final static short DEFAULT_VRECT_MIN = 7100;       // 7.1 Volts
-    private final static short DEFAULT_VRECT_MAX = 19300;       // 19.3 Volts
-    private final static short DEFAULT_VRECT_SET = 7200;       // 7.2 Volts
-    private final static short DEFAULT_DELTA_R1 = 0x0001;
-    private final static int DEFAULT_RFU_VAL = 0x0000;
+    private static final byte DEFAULT_CATEGORY = 0x0003;
+    private static final byte DEFAULT_CAPABILITIES = 0x00;
+    private static final byte DEFAULT_HW_VERSION = 0x0007;
+    private static final byte DEFAULT_FW_VERSION = 0x0006;
+    private static final byte DEFAULT_MAX_POWER_DESIRED = 0x0032;  // 5Watts
+    private static final short DEFAULT_VRECT_MIN = 7100;       // 7.1 Volts
+    private static final short DEFAULT_VRECT_MAX = 19300;       // 19.3 Volts
+    private static final short DEFAULT_VRECT_SET = 7200;       // 7.2 Volts
+    private static final short DEFAULT_DELTA_R1 = 0x0001;
+    private static final int DEFAULT_RFU_VAL = 0x0000;
     private static final int MSB_MASK = 0xFF00;
     private static final int LSB_MASK= 0x00FF;
     // On charge port disbaled need to be set to 10.2 Volts
-    private final static short VRECT_MIN_CHG_DISABLED = 10200;
+    private static final short VRECT_MIN_CHG_DISABLED = 10200;
     // Populate Vrectmin, Vrectmax, Vrectset and temperature in the optional fields
-    private final static byte OPTIONAL_FIELD_MASK = 0x3C;
+    private static final byte OPTIONAL_FIELD_MASK = 0x3C;
 
     //Timeout value set to 5Sec which enures we advertise in limited mode
     private static final int WIPOWER_ADV_TIMEOUT = 5000;
@@ -156,9 +158,25 @@ public class A4wpService extends Service
     private static final int VRECT_MAX_MSB = 15;
     private static final int PRU_ALERT = 16;
 
+    /*
+     * PRU ALERT fields in BSS 1.3 are defined as follows
+     * Bit 7    6    5    4          3              2    1            0
+     *     OVP, OCP, OTP, Self_prot, Charge Complt, USB, Charge Port, PowerSharing Resp
+     */
+    private static final byte PRU_ALERT_OVER_VOLTAGE_DETECT_BIT = (byte) 0x80;
+    private static final byte PRU_ALERT_OVER_CURRENT_DETECT_BIT = 0x40;
+    private static final byte PRU_ALERT_OVER_TEMPERATURE_DETECT_BIT = 0x20;
+    private static final byte PRU_ALERT_SELF_PROTECT_DETECT_BIT = 0x10;
+    private static final byte PRU_ALERT_CHARGE_COMPLETE_BIT = 0x08;
+    private static final byte PRU_ALERT_WIRE_CHARGER_DETECT_BIT = 0x04;
+    private static final byte PRU_ALERT_CHARGE_PORT_ENABLED_BIT = 0x02;
+    private static final byte PRU_ALERT_PWR_SHARE_RESP_BIT = 0x01;
+
     private static boolean mWipowerBoot = false;
     private static boolean isChargePortSet = false;
-    static boolean mChargeComplete = true;
+    static boolean mChargeComplete = false;
+    static boolean mUSBCharging = false;
+    static boolean mOverTemperature = false;
     static boolean mOutputControl = false;
     private static boolean mDiscInitiated = false; // If TRUE, means A4WP app has initiated the disconnection with PTU
     private static boolean mEnablePruAlerts = false;  // Are PRU Alerts enabled
@@ -181,7 +199,7 @@ public class A4wpService extends Service
         if (!isChargePortSet) {
             VRECT_DYN = (short)toUnsigned(value[VRECT_LSB]);
             VRECT_DYN |= (short)(toUnsigned(value[VRECT_MSB]) << 8);
-            if (DEFAULT_VRECT_MIN <= VRECT_DYN && mOutputControl) {
+            if (VRECT_MIN_CHG_DISABLED <= VRECT_DYN && mOutputControl) {
                 mWipowerManager.startCharging();
                 isChargePortSet = true;
             }
@@ -197,17 +215,25 @@ public class A4wpService extends Service
     }
 
     private synchronized void initiateDisconnection() {
-        Log.v(LOGTAG, "initiateDisconnection:" + " mDiscInitiated:" + mDiscInitiated + " mState:" + mState);
+        if (sDebug) Log.v(LOGTAG, "initiateDisconnection:" + " mDiscInitiated:" + mDiscInitiated + " mState:" + mState);
         if ((mDiscInitiated == false) && (mState == BluetoothProfile.STATE_CONNECTED))
         {
             if (mBluetoothGattServer != null && mDevice != null) {
-                Log.v(LOGTAG, "initiateDisconnection:" + " dropping Connection");
+                if (sDebug) Log.v(LOGTAG, "initiateDisconnection:" + " dropping Connection");
                 mDiscInitiated = true;
                 mBluetoothGattServer.cancelConnection(mDevice);
                 mWipowerManager.enablePowerApply(false, false, false);
-                if (mChargeComplete == true) {
+                if ((mChargeComplete == true) || (mUSBCharging == true)) {
+                    /*
+                     * If charge is complete or USB wire charging is in progress, then MTP
+                     * needs to connect after 600 ms of continuous PTU power.
+                     */
                     mWipowerManager.enablePowerApply(true, true, true);
                 } else {
+                    /*
+                     * Device needs to be charged, so start advertising after 30 ms detecting PTU power.
+                     * Connect on the long beacon.
+                     */
                     mWipowerManager.enablePowerApply(true, true, false);
                 }
             }
@@ -220,35 +246,82 @@ public class A4wpService extends Service
         @Override
         public void onWbcEventUpdate(int what, int arg1, int arg2) {
             Log.v(LOGTAG, "onWbcEventUpdate rcvd: " + what + ", " + arg1 + ", " + arg2);
-            if ((what == WbcTypes.WBC_EVENT_TYPE_CHARGING_REQUIRED_STATUS)){
-                mWipowerManager.enablePowerApply(false, false, false);
-                if ((arg1 == WbcTypes.WBC_BATTERY_STATUS_CHARGING_NOT_REQUIRED)){
-                    // this will set charge complete bit in pru alert
-                    // eventally leading to a possible disconnect from ptu
-                    mChargeComplete = true;
-                    if (mPruAlert != null)
-                    {
-                       byte  alert = 0;
-                       alert = (byte) (alert | CHARGE_COMPLETE_BIT);
-                       mPruAlert.sendPruAlert(alert);
-                    }
-                    if ((mState == BluetoothProfile.STATE_DISCONNECTED) && (mWipowerManager != null))
+
+            switch (what) {
+                case WbcTypes.WBC_EVENT_TYPE_CHARGE_COMPLETE:
+                    if (arg1 == WbcTypes.WBC_BATTERY_STATUS_CHARGE_COMPLETE) {
+                        // this will set charge complete bit in pru alert
+                        // eventally leading to a possible disconnect from ptu
+                        mChargeComplete = true;
+                        if (mPruAlert != null) {
+                            byte  alert = 0;
+                            alert = (byte) (alert | PRU_ALERT_CHARGE_COMPLETE_BIT);
+                            mPruAlert.sendPruAlert(alert);
+                        }
+                        mWipowerManager.enablePowerApply(false, false, false);
                         mWipowerManager.enablePowerApply(true, true, true);
-                } else {
-                    // We could be in 600mS scan state here and since charging needs to be resumed
-                    // send enable power apply command to scan for short beacons */
-                    mChargeComplete = false;
-                    if ((mState == BluetoothProfile.STATE_DISCONNECTED) && (mWipowerManager != null))
-                        mWipowerManager.enablePowerApply(true, true, false);
-                }
-            } else if (what == WbcTypes.WBC_EVENT_TYPE_PTU_PRESENCE_STATUS) {
-                if (arg1 == WbcTypes.WBC_PTU_STATUS_NOT_PRESENT) {
-                    initiateDisconnection();
-                }
+                    } else {
+                        mChargeComplete = false;
+                        if ((mUSBCharging == false) &&  (mState == BluetoothProfile.STATE_DISCONNECTED)) {
+                            mWipowerManager.enablePowerApply(false, false, false);
+                            mWipowerManager.enablePowerApply(true, true, false);
+                        }
+                    }
+                    break;
+                case WbcTypes.WBC_EVENT_TYPE_PTU_PRESENCE_STATUS:
+                    if (arg1 == WbcTypes.WBC_PTU_STATUS_NOT_PRESENT && mState == BluetoothProfile.STATE_CONNECTED)
+                        initiateDisconnection();
+                    break;
+                case WbcTypes.WBC_EVENT_TYPE_USB_CHARGING_PRESENT:
+                    if (arg1 == WbcTypes.WBC_USB_CHARGING_PRESENT) {
+                        mUSBCharging = true;
+                        // Set the wire charger bit here and send alert.
+                        if (mPruAlert != null) {
+                            byte alert = 0;
+                            alert = (byte) (alert | PRU_ALERT_WIRE_CHARGER_DETECT_BIT);
+                            mPruAlert.sendPruAlert(alert);
+                        }
+                        mWipowerManager.enablePowerApply(false, false, false);
+                        mWipowerManager.enablePowerApply(true, true, true);
+                    } else {
+                        mUSBCharging = false;
+                        if ((mChargeComplete == false) &&  (mState == BluetoothProfile.STATE_DISCONNECTED)) {
+                            mWipowerManager.enablePowerApply(false, false, false);
+                            mWipowerManager.enablePowerApply(true, true, false);
+                        }
+                    }
+                    break;
+                case WbcTypes.WBC_EVENT_TYPE_BATTERY_OVERHEAT:
+                    mWipowerManager.enablePowerApply(false, false, false);
+                    // Set the over-temperature bit here and send alert.
+                    if (arg1 == WbcTypes.WBC_BATTERY_OVERHEAT) {
+                        mOverTemperature = true;
+                        if (mPruAlert != null) {
+                            byte  alert = 0;
+                            alert = (byte) (alert | PRU_ALERT_OVER_TEMPERATURE_DETECT_BIT);
+                            mPruAlert.sendPruAlert(alert);
+                        }
+                    }
+                    else {
+                        mOverTemperature = false;
+                        if ((mChargeComplete == false) &&  mUSBCharging == false && (mState == BluetoothProfile.STATE_DISCONNECTED)) {
+                            mWipowerManager.enablePowerApply(false, false, false);
+                            mWipowerManager.enablePowerApply(true, true, false);
+                        }
+                    }
+                    break;
+                case WbcTypes.WBC_EVENT_TYPE_WIPOWER_CHARGING_ACTIVE_STATUS:
+                    // Do nothing.
+                    break;
+                default:
+                    Log.v(LOGTAG, "onWbcEventUpdate: Unrecognized event received");
+                    break;
             }
-            Log.v(LOGTAG, "onWbcEventUpdate: charge complete " +  mChargeComplete);
+            if (sDebug) Log.v(LOGTAG, "onWbcEventUpdate: charge complete " +  mChargeComplete);
+            if (sDebug) Log.v(LOGTAG, "onWbcEventUpdate: USB charging " +  mUSBCharging);
         }
     };
+
 
     private  void acquire_wake_lock(boolean wake) {
         if (wake == true) {
@@ -387,7 +460,7 @@ public class A4wpService extends Service
             int intValue= 0;
             intValue = ((value[0]<< 8) & 0x0000ff00) | ((value[1] << 0) & 0x000000ff);
 
-            Log.v(LOGTAG, "processPruAlertRequest. Value: " + intValue);
+            if (sDebug) Log.v(LOGTAG, "processPruAlertRequest. Value: " + intValue);
 
             if ((intValue & PRU_ALERT_NOTIFY_BIT) == PRU_ALERT_NOTIFY_BIT) {
                 Log.v(LOGTAG, "processPruAlertRequest. PRU Alerts Enabled");
@@ -492,7 +565,7 @@ public class A4wpService extends Service
         public double getPower() {
             double val = ((mPower&0xfc)>>2);
             val = 0.5*(val+1);
-            Log.v(LOGTAG, "getPower<=" + val);
+            if (sDebug) Log.v(LOGTAG, "getPower<=" + val);
             if (val > 22) val = 22.0;
             return val;
         }
@@ -500,7 +573,7 @@ public class A4wpService extends Service
         public double getMaxSrcImpedence() {
             double val = ((mMaxSrcImpedence&0xf8)>>3);
             val = 50 + (val*10);
-            Log.v(LOGTAG, "getSrcImpedence<=" + val);
+            if (sDebug) Log.v(LOGTAG, "getSrcImpedence<=" + val);
             if (val > 375) val = 375.0;
             return val;
         }
@@ -508,14 +581,14 @@ public class A4wpService extends Service
         public double getMaxLoadResistance() {
             double val = ((mMaxLoadResistance&0xf8)>>3);
             val = 5 * (val+1);
-            Log.v(LOGTAG, "getMaxLoadResistance<=" + val);
+            if (sDebug) Log.v(LOGTAG, "getMaxLoadResistance<=" + val);
             if (val > 55) val = 55.0;
             return val;
         }
 
         public float getMaxDevicesSupported() {
             int val = mMaxDevicesSupported +1;
-            Log.v(LOGTAG, "getMaxDevicesSupported<=" + val);
+            if (sDebug) Log.v(LOGTAG, "getMaxDevicesSupported<=" + val);
             if (val > 8) val = 8;
             return val;
         }
@@ -621,7 +694,7 @@ public class A4wpService extends Service
           */
          public boolean getPermission() {
 
-             Log.v(LOGTAG, "getPermission" + mPermission);
+             if (sDebug) Log.v(LOGTAG, "getPermission" + mPermission);
              if (mPermission == 0x00) return true;
              else return false;
          }
@@ -703,14 +776,12 @@ public class A4wpService extends Service
 
     private int processPtuStaticParam(byte[] value) {
         int status = 0;
-        Log.v(LOGTAG, "processPtuStaticParam>");
+        if (sDebug) Log.v(LOGTAG, "processPtuStaticParam>");
         mPtuStaticParam = new PtuStaticParam(value);
         mPtuStaticParam.print();
 
         return status;
     }
-
-    private static final byte CHARGE_COMPLETE_BIT = 0x08;
 
     /**
      * Wipower callbacks
@@ -721,7 +792,7 @@ public class A4wpService extends Service
         public void onWipowerReady() {
             Log.v(LOGTAG, "onWipowerReady");
             mWipowerManager.enablePowerApply(false, false, false);
-            if (mChargeComplete == true) {
+            if ((mChargeComplete == true) || (mUSBCharging == true)) {
                 mWipowerManager.enablePowerApply(true, true, true);
             } else {
                 mWipowerManager.enablePowerApply(true, true, false);
@@ -745,17 +816,17 @@ public class A4wpService extends Service
 
         @Override
         public void onWipowerAlert(byte alert) {
-            Log.v(LOGTAG, "onWipowerAlert: " + alert + " alert recieved");
+            if (sDebug) Log.v(LOGTAG, "onWipowerAlert: " + alert + " alert recieved");
             mPruAlert.sendPruAlert(alert);
         }
 
 
         @Override
         public void onWipowerData(WipowerDynamicParam data) {
-            Log.v(LOGTAG, "onWipowerData Alert");
+            if (sDebug) Log.v(LOGTAG, "onWipowerData Alert");
             byte[] value = data.getValue();
             chkDynParamsAndStartCharging(value);
-            Log.v(LOGTAG, "calling SetValue");
+            if (sDebug) Log.v(LOGTAG, "calling SetValue");
             mPruDynamicParam.setValue(value);
         }
 
@@ -782,11 +853,13 @@ public class A4wpService extends Service
                     mWipowerManager.enableAlertNotification(false);
                     mEnablePruAlerts  = false;
                     mWipowerManager.stopCharging();
-                    mWipowerManager.enablePowerApply(false, false, false);
-                    if (mChargeComplete != true) {
-                        mWipowerManager.enablePowerApply(true, true, false);
-                    } else {
+                    mWipowerManager.enablePowerApply(false, false, false); // Always reset the FW state machine
+                    if ((mChargeComplete == true) || (mUSBCharging == true)) {
                         mWipowerManager.enablePowerApply(true, true, true);
+
+                    } else {
+                        mWipowerManager.enablePowerApply(true, true, false);
+
                     }
                     if(SystemProperties.getBoolean("persist.a4wp.skipwakelock", false) == false) {
                         /* Drop wake lock once the connection is dropped gracefully */
@@ -843,7 +916,7 @@ public class A4wpService extends Service
 
                 if (value != null)
                 {
-                     Log.v(LOGTAG, "device=" + id + "requestId=" + requestId + "status=" + status + "offset=" + offset + "value=" + value[0]);
+                     if (sDebug) Log.v(LOGTAG, "device=" + id + "requestId=" + requestId + "status=" + status + "offset=" + offset + "value=" + value[0]);
                      mBluetoothGattServer.sendResponse(device, requestId, status, offset, value);
                 }
         }
@@ -885,6 +958,9 @@ public class A4wpService extends Service
                     value = mPruStaticParam.getValue();
                     mDevice = device;
                     mState = BluetoothProfile.STATE_CONNECTED;
+                    /* intiate a server connect so that gatt will maintain
+                    ** this as a vote in its existing  LE connections.*/
+                    mBluetoothGattServer.connect(mDevice, false);
                     mWipowerManager.enableDataNotification(true);
                 }
                 else if (id == A4WP_PRU_DYNAMIC_UUID) {
@@ -893,11 +969,29 @@ public class A4wpService extends Service
                          return;
                     }
                     value = mPruDynamicParam.getValue();
+
+                    /*
+                     * TODO: Populate all PRU ALERT fields in the PRU dynamic parameter. Populate
+                     * charge complete, Wire charge detect, Over Temp Protection on WBC feedback.
+                     */
                     if (mChargeComplete == true) {
-                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] | CHARGE_COMPLETE_BIT);
+                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] | PRU_ALERT_CHARGE_COMPLETE_BIT);
                     } else {
-                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] & (~CHARGE_COMPLETE_BIT));
+                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] & (~PRU_ALERT_CHARGE_COMPLETE_BIT));
                     }
+
+                    if (mUSBCharging == true) {
+                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] | PRU_ALERT_WIRE_CHARGER_DETECT_BIT);
+                    } else {
+                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] & (~PRU_ALERT_WIRE_CHARGER_DETECT_BIT));
+                    }
+
+                    if (mOverTemperature == true) {
+                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] | PRU_ALERT_OVER_TEMPERATURE_DETECT_BIT);
+                    } else {
+                        value[PRU_ALERT] = (byte)(value[PRU_ALERT] & (~PRU_ALERT_OVER_TEMPERATURE_DETECT_BIT));
+                    }
+
                     value[OPTIONAL_FIELDS] = (byte)OPTIONAL_FIELD_MASK;
                     value[VRECT_MAX_LSB] = (byte)(LSB_MASK & DEFAULT_VRECT_MAX);
                     value[VRECT_MAX_MSB] = (byte)((MSB_MASK & DEFAULT_VRECT_MAX) >> 8);
@@ -920,7 +1014,7 @@ public class A4wpService extends Service
                     }
                    value = mPruControl.getValue();
                 }
-                if (mBluetoothGattServer != null) {
+                if (mBluetoothGattServer != null && mDiscInitiated != true) {
                     mBluetoothGattServer.sendResponse(device, requestId, status, offset, value);
                 }
         }
@@ -933,6 +1027,7 @@ public class A4wpService extends Service
 
     private void closeServer() {
         if (mBluetoothGattServer != null) {
+            if (sDebug) Log.v(LOGTAG, "disconnect and closeServer");
             if (mDevice != null) mBluetoothGattServer.cancelConnection(mDevice);
             mBluetoothGattServer.close();
         }
@@ -950,7 +1045,7 @@ public class A4wpService extends Service
             Log.d(LOGTAG, "advertise success " + mIndex);
             if (mWipowerManager != null) {
                 mWipowerManager.enablePowerApply(false, false, false);
-                if (mChargeComplete == true) {
+                if ((mChargeComplete == true) || (mUSBCharging == true)) {
                     mWipowerManager.enablePowerApply(true, true, true);
                 } else {
                     mWipowerManager.enablePowerApply(true, true, false);
@@ -985,7 +1080,7 @@ public class A4wpService extends Service
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .setConnectable(true).build();
 
-        Log.d(LOGTAG, " Calling mAdvertiser.startAdvertising");
+        if (sDebug) Log.d(LOGTAG, " Calling mAdvertiser.startAdvertising");
         if(mAdvertiser != null)
             mAdvertiser.startAdvertising(mAdvertiseSettings, mAdvertisementData, mAdvertiseCallback);
         else
@@ -996,6 +1091,7 @@ public class A4wpService extends Service
     {
        /* to be completed */
        if (mAdvertiseCallback != null &&  mAdvertiser != null) {
+           if (sDebug) Log.d(LOGTAG, "stop advertising on service destroy");
            mAdvertiser.stopAdvertising(mAdvertiseCallback);
        }
     }
@@ -1004,7 +1100,7 @@ public class A4wpService extends Service
         BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         if (bluetoothManager == null) return false;
 
-        mBluetoothGattServer = bluetoothManager.openGattServer(this, mGattCallbacks);
+        mBluetoothGattServer = bluetoothManager.openGattServer(this, mGattCallbacks, BluetoothDevice.TRANSPORT_LE);
         Log.d(LOGTAG,"calling start server......");
         if (mBluetoothGattServer == null) {
             Log.e(LOGTAG,"mBluetoothGattServer is NULL");
@@ -1068,14 +1164,16 @@ public class A4wpService extends Service
         Log.v(LOGTAG, "onCreate");
         super.onCreate();
 
+        sDebug = SystemProperties.getBoolean("persist.a4wp.logging", false);
+
         // Ensure Bluetooth is enabled
         mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        if (mBluetoothAdapter == null || !mBluetoothAdapter.isEnabled()) {
+        if (mBluetoothAdapter == null || !mBluetoothAdapter.isLeEnabled()) {
             Log.d(LOGTAG, "Bluetooth is not available or enabled - exiting...");
             return;
         }
 
-        Log.v(LOGTAG, "calling startService");
+        if (sDebug) Log.v(LOGTAG, "calling startService");
         startServer();
         //Initialize PRU Static param
         mPruStaticParam = new PruStaticParam();
@@ -1083,13 +1181,22 @@ public class A4wpService extends Service
         mPruAlert = new PruAlert((byte)0);
         mPruControl = new PruControl();
 
+        if (sDebug) Log.v(LOGTAG, "onCreate: charge complete " + mChargeComplete);
+
+        /*
+         * What happens when WiPowerManager or WbcManager is NULL? This is not being checked?
+         * This should be checked for NULL to ensure the appropriate classes/services are created.
+         * The system properties determine if the wipower is supported or not. If properties are
+         * not set, then need to abort all WiPower functionality including this class.
+         */
         mWipowerManager = WipowerManager.getWipowerManger(this, mWipowerCallback);
         if (mWipowerManager != null)
              mWipowerManager.registerCallback(mWipowerCallback);
         mWbcManager = WbcManager.getInstance();
         if (mWbcManager != null) {
-            mChargeComplete = (mWbcManager.getChargingRequired() == 0);
-            Log.v(LOGTAG, "onCreate: charge complete " + mChargeComplete);
+            mChargeComplete = (mWbcManager.getChargeComplete() == 1);
+            mUSBCharging = (mWbcManager.getUSBChargingPresent() == 1);
+            Log.v(LOGTAG, "onCreate: charge complete " + mChargeComplete + " mUSBCharging " + mUSBCharging);
             mWbcManager.register(mWbcCallback);
         }
     }
@@ -1097,8 +1204,11 @@ public class A4wpService extends Service
     @Override
     public void onDestroy() {
         Log.v(LOGTAG, "onDestroy");
-        if (mWipowerManager != null)
+        stopAdvertising();
+        closeServer();
+        if (mWipowerManager != null) {
              mWipowerManager.unregisterCallback(mWipowerCallback);
+        }
         if (mWbcManager != null)
              mWbcManager.unregister(mWbcCallback);
         if(SystemProperties.getBoolean("persist.a4wp.skipwakelock", false) == false) {
@@ -1121,7 +1231,7 @@ public class A4wpService extends Service
 
         //mWipowerBoot is used to hold power enable command till the service is been registered completely
         if (mWipowerBoot == true && mWipowerManager != null) {
-            if (mChargeComplete == true) {
+            if ((mChargeComplete == true) || (mUSBCharging == true)) {
                 mWipowerManager.enablePowerApply(true, true, true);
             } else {
                 mWipowerManager.enablePowerApply(true, true, false);
@@ -1131,6 +1241,6 @@ public class A4wpService extends Service
             //release wake lock in case if held during crashes or on BT restart.
             acquire_wake_lock(false);
         }
-        return START_STICKY;
+        return START_NOT_STICKY;
    }
 }
